@@ -1,178 +1,116 @@
 import streamlit as st
 import pandas as pd
-import base64
 import numpy as np
 
-
-class DataImputer:
-    def __init__(self, dataframe, start_year, end_year, category_col=None, interpolation_method="Linear"):
-        # model parameters
-        self.dataframe = dataframe
-        self.start_year = start_year
-        self.end_year = end_year
-        self.category_col = category_col
-        self.interpolation_method = interpolation_method
-
-    def impute_data(self):
-        if self.category_col:
-            if self.interpolation_method == "Linear":
-                return self.impute_based_on_category(self.linear_interpolate)
-            else:  # Exponential interpolation
-                return self.impute_based_on_category(self.exponential_interpolate)
+# Load data from file
+def load_data(use_demo):
+    if use_demo:
+        return pd.read_excel('demo.xlsx')
+    uploaded_file = st.sidebar.file_uploader("1. Upload your data file", type=['csv', 'xlsx'])
+    if uploaded_file:
+        if uploaded_file.name.endswith('.csv'):
+            return pd.read_csv(uploaded_file)
         else:
-            if self.interpolation_method == "Linear":
-                return self.impute_across_all(self.linear_interpolate)
-            else:  # Exponential interpolation
-                return self.impute_across_all(self.exponential_interpolate)
-
-    def impute_based_on_category(self, interpolation_func):
-        # Apply interpolation to each category group
-        return self.dataframe.groupby(self.category_col, group_keys=False).apply(interpolation_func)
-
-    def impute_across_all(self, interpolation_func):
-        # Apply interpolation to the whole dataset
-        return interpolation_func(self.dataframe)
-
-    def linear_interpolate(self, df):
-        # Interpolation logic to handle "backward" filling from the end year
-        start_idx = df.columns.get_loc(self.start_year)
-        end_idx = df.columns.get_loc(self.end_year) + 1
-
-        # Backward fill from the end year to handle rows with data only in the end year
-        df.iloc[:, start_idx:end_idx] = df.iloc[:, start_idx:end_idx].bfill(axis=1)
-
-        # Now apply linear interpolation
-        df.iloc[:, start_idx:end_idx] = df.iloc[:, start_idx:end_idx].interpolate(method='linear', axis=1)
-
-        return df
-
-    def exponential_interpolate(self, df):
-        start_idx = df.columns.get_loc(self.start_year)
-        end_idx = df.columns.get_loc(self.end_year) + 1
-
-        # Compute growth rates for rows with both start and end year data
-        rates = []
-        for i, row in df.iterrows():
-            if not pd.isna(row[self.start_year]) and not pd.isna(row[self.end_year]):
-                rate = (row[self.end_year] / row[self.start_year]) ** (1 / (end_idx - start_idx - 1)) - 1
-                rates.append(rate)
-
-        avg_rate = np.mean(rates) if rates else 0  # Calculate average rate
-
-        # Apply growth rate to all rows
-        for i, row in df.iterrows():
-            if not pd.isna(row[self.start_year]):
-                # If there's a start year value, apply the specific or average growth rate
-                rate = rates.pop(0) if rates else avg_rate
-                for j in range(start_idx + 1, end_idx):
-                    df.at[i, df.columns[j]] = df.at[i, df.columns[j - 1]] * (1 + rate)
-            else:
-                # For rows with only end year data, apply the average rate backwards
-                for j in range(end_idx - 2, start_idx - 1, -1):
-                    df.at[i, df.columns[j]] = df.at[i, df.columns[j + 1]] / (1 + avg_rate)
-
-        return df
-
-
-def load_data(uploaded_file):
-    if uploaded_file is not None:
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                return pd.read_csv(uploaded_file)
-            elif uploaded_file.name.endswith('.xlsx'):
-                return pd.read_excel(uploaded_file)
-        except Exception as e:
-            st.error(f"Error loading data: {e}")
+            return pd.read_excel(uploaded_file)
     return None
 
+# Impute a single row based on given growth rate
+def impute_row(row, start_col, end_col, growth_rate):
+    imputed_row = row.copy()
+    columns = row.index[start_col:end_col + 1]
+    values = row[columns].dropna()
 
-def get_table_download_link(df):
-    csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    href = f'<a href="data:file/csv;base64,{b64}" download="imputed_data.csv">Download imputed data as CSV</a>'
-    return href
+    # Compute growth rate if possible
+    if len(values) > 1:
+        first_value, last_value = values.iloc[0], values.iloc[-1]
+        num_periods = len(columns) - 1
+        growth_rate = (last_value - first_value) / num_periods
 
-st.write("## Growth Rate Imputations for Time Series Data")
-st.write("""
-##### Directions
-This application is designed to impute missing values in datasets across time series data based on implied growth rates. 
-The directions are clearly outlined on the sidebar.""")
+    if pd.isna(growth_rate):
+        return imputed_row
 
-st.write("""
-First, upload your data in csv or xlsx format. Next, select your start and end periods (ie. years). 
-Then, select how you would like to impute null values. 
-Then, select either linear or exponential interpolation for filling these missing values. 
-Finally, click the 'Impute Data' button to see the imputed data. Scroll down the page to preview the imputed data.
-You can also click the 'Download imputed data as CSV' link to download the imputed data.""")
+    # Impute missing values based on growth rate
+    for col in columns:
+        if pd.isna(imputed_row[col]):
+            prev_col = columns[columns.get_loc(col) - 1]
+            if columns.get_loc(col) > 0 and not pd.isna(imputed_row[prev_col]):
+                imputed_row[col] = round(imputed_row[prev_col] + growth_rate)
+            else:
+                next_value = values.iloc[0] if len(values) > 0 else None
+                if next_value is not None:
+                    next_col = values.index[0]
+                    periods_before = columns.get_loc(next_col) - columns.get_loc(col)
+                    imputed_row[col] = round(next_value - (growth_rate * periods_before))
+    return imputed_row
 
-st.write("""
-As the imputations are based on the implied growth rates between selected periods 
-(or the average rates of all or some records), 
-not all records need to have non-null values for the start and end periods, 
-however each record must have data for either the start or end periods in order to complete the imputations. 
-The application will impute the missing values based on the average growth rate of the available data.
-""")
+# Compute growth rates for each row
+def compute_growth_rates(df, start_col, end_col):
+    growth_rates = {}
+    columns = df.columns[start_col:end_col + 1]
+    for idx, row in df.iterrows():
+        values = row[columns].dropna()
+        if len(values) > 1:
+            first_value, last_value = values.iloc[0], values.iloc[-1]
+            num_periods = len(values) - 1
+            growth_rates[idx] = (last_value - first_value) / num_periods
+    return growth_rates
 
-with st.sidebar:
-    st.write("### 1.) Upload Data")
-    uploaded_file = st.file_uploader("Upload your CSV or Excel file", type=['csv', 'xlsx'])
+# Apply growth rates to impute missing values
+def apply_growth_rates(df, start_col, end_col, growth_rates, category_col=None):
+    if category_col:
+        category_means = df.groupby(category_col).apply(
+            lambda x: np.nanmean([growth_rates.get(idx, np.nan) for idx in x.index])
+        )
+        df = df.apply(
+            lambda row: impute_row(row, start_col, end_col, category_means.get(row[category_col], np.nan)), axis=1
+        )
+    else:
+        mean_growth_rate = np.nanmean(list(growth_rates.values()))
+        df = df.apply(lambda row: impute_row(row, start_col, end_col, mean_growth_rate), axis=1)
+    return df
 
-df = None
+# Main function to create Streamlit app
+def main():
+    st.title("Growth Rate Data Imputation Tool")
+    st.write("This tool imputes missing data points in your dataset based on a calculated growth rate. "
+             "Follow the sidebar instructions to upload your data and configure the imputation settings.")
+    st.write("**Author:** Zachary Pinto")
+    st.write("**GitHub:** zachpinto")
+    st.write("**edX:** zachwalker98")
+    st.write("**City and Country:** Ballston Spa, NY, United States")
+    st.write("**Date:** August 4th, 2024")
 
-if uploaded_file is not None:
-    df = load_data(uploaded_file)
+    use_demo = st.sidebar.checkbox("2. Use demo file (demo.xlsx)")
+    df = load_data(use_demo)
+
     if df is not None:
-        st.write("### Uploaded Data Preview")
+        st.write("Uploaded Data Preview")
         st.dataframe(df.head())
 
-        # Sidebar for inputs
-        with st.sidebar:
-            st.write("### 2.) Column Selection")
-            column_names = df.columns.tolist()
-            start_year = st.selectbox("Select the Start Year Column:", column_names, key='start_year')
-            end_year = st.selectbox("Select the End Year Column:", column_names, key='end_year')
+        # Select columns for imputation
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        start_year = st.sidebar.selectbox("3. Select Start Year Column:", numeric_cols)
+        end_year = st.sidebar.selectbox("4. Select End Year Column:", numeric_cols)
+        handling_method = st.sidebar.radio(
+            "5. Handling Method for Undefined Growth Rates:",
+            ['Average of ALL rows', 'Average of rows with SHARED CATEGORY']
+        )
+        category_col = None
+        if handling_method == 'Average of rows with SHARED CATEGORY':
+            category_col = st.sidebar.selectbox("6. Select the Category Column:", df.columns)
 
-            # Check if the selected columns contain non-numerical non-null data
-            if not pd.to_numeric(df[start_year].dropna(), errors='coerce').notnull().all() or \
-               not pd.to_numeric(df[end_year].dropna(), errors='coerce').notnull().all():
-                st.error("Selected start or end year columns contain non-numerical, non-null data. "
-                         "Please select different columns.")
-                df = None  # Prevent further processing
+        # Impute data based on selected columns
+        if st.sidebar.button("7. Impute Data"):
+            start_idx = df.columns.get_loc(start_year)
+            end_idx = df.columns.get_loc(end_year)
+            growth_rates = compute_growth_rates(df, start_idx, end_idx)
+            df = apply_growth_rates(df, start_idx, end_idx, growth_rates, category_col)
 
-            # Continue with other inputs if the data checks are passed
-            if df is not None:
-                st.write("### 3.) Missing Data Handling")
-                option = st.radio(
-                    "For years without any clear growth rates, "
-                    "would you like their growth rates to be calculated using:",
-                    ('An average of ALL rows', 'An average of rows with a SHARED CATEGORY'),
-                    key='data_handling_option'
-                )
+            st.write("Imputed Data")
+            st.dataframe(df)
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button("Download imputed data as CSV", csv, "imputed_data.csv", "text/csv")
 
-                category_col = None
-                if option == 'An average of rows with a SHARED CATEGORY':
-                    category_col = st.selectbox("Select the column to categorize by:", column_names,
-                                                index=0,
-                                                key='category_column')
-
-                st.write("### 4.) Interpolation Method")
-                interpolation_method = st.selectbox("Select the interpolation method:", ["Linear", "Exponential"],
-                                                    key='interpolation_method')
-
-                if st.button("Impute Data", key='impute_data'):
-                    st.session_state['impute'] = True
-                else:
-                    st.session_state['impute'] = st.session_state.get('impute', False)
-
-# Outside the sidebar, check if the button was pressed and display the imputed data
-if 'impute' in st.session_state and st.session_state['impute'] and df is not None:
-    # Check if df is defined and the impute button has been pressed
-    imputer = DataImputer(df, start_year, end_year, category_col, interpolation_method)
-    imputed_df = imputer.impute_data()
-
-    if imputed_df is not None and not imputed_df.empty:
-        st.write("### Imputed Data Preview")
-        st.dataframe(imputed_df.head())
-        st.markdown(get_table_download_link(imputed_df), unsafe_allow_html=True)
-    else:
-        st.error("Data imputation failed or no data to display.")
+# Run the app
+if __name__ == "__main__":
+    main()
